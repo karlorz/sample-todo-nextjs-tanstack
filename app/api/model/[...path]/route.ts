@@ -5,12 +5,25 @@ import { Hono } from 'hono'
 import { createHonoHandler } from '@zenstackhq/server/hono'
 import { handle } from 'hono/vercel'
 import { prisma } from 'server/db'
+import type { User, Prisma } from '@prisma/client'
 
-// Change runtime from edge to nodejs to work with Prisma
 export const runtime = 'nodejs'
 
 interface SessionResponse {
-  user: Session['user'] | null
+  user: Session['user'] & {
+    provider?: string;
+    providerAccountId?: string;
+  } | null
+}
+
+interface UserUpdates extends Partial<User> {
+  accounts?: {
+    create: {
+      provider: string;
+      providerAccountId: string;
+      type: string;
+    }
+  }
 }
 
 // create an enhanced Prisma client with user context
@@ -31,13 +44,85 @@ async function getPrisma(c: Context) {
 
     const data = (await response.json()) as SessionResponse
     
-    if (data.user?.id) {
-      const user = await prisma.user.findUniqueOrThrow({
-        where: { id: data.user.id },
-        include: { memberships: true },
+    if (data.user?.id && data.user?.email) {
+      // Try to find existing user and their accounts
+      let user = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { id: data.user.id },
+            { email: data.user.email },
+            ...(data.user.provider && data.user.providerAccountId ? [{
+              accounts: {
+                some: {
+                  provider: data.user.provider,
+                  providerAccountId: data.user.providerAccountId
+                }
+              }
+            }] : [])
+          ]
+        },
+        include: { 
+          memberships: true,
+          accounts: true
+        },
       })
 
-      return enhance(prisma, { user })
+      const isOAuthLogin = data.user.provider && data.user.providerAccountId;
+
+      if (user) {
+        // Update existing user if needed
+        const updates: UserUpdates = {};
+        if (user.id !== data.user.id) updates.id = data.user.id;
+        if (user.name !== data.user.name && data.user.name) updates.name = data.user.name;
+        if (user.image !== data.user.image && data.user.image) updates.image = data.user.image;
+        
+        if (Object.keys(updates).length > 0) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: updates as Prisma.UserUpdateInput,
+            include: { memberships: true }
+          })
+        }
+
+        // If this is OAuth login and we don't have an account record yet, create it
+        if (isOAuthLogin && !user.accounts.some(a => 
+          a.provider === data.user.provider && 
+          a.providerAccountId === data.user.providerAccountId
+        )) {
+          await prisma.account.create({
+            data: {
+              provider: data.user.provider!,
+              providerAccountId: data.user.providerAccountId!,
+              type: 'oauth',
+              userId: user.id
+            }
+          })
+        }
+      } else {
+        // Create new user
+        user = await prisma.user.create({
+          data: {
+            id: data.user.id,
+            email: data.user.email,
+            name: data.user.name || null,
+            image: data.user.image || null,
+            ...(isOAuthLogin ? {
+              accounts: {
+                create: {
+                  provider: data.user.provider!,
+                  providerAccountId: data.user.providerAccountId!,
+                  type: 'oauth'
+                }
+              }
+            } : {})
+          },
+          include: { memberships: true }
+        })
+      }
+
+      if (user) {
+        return enhance(prisma, { user })
+      }
     }
   } catch (error) {
     console.error('Failed to get user session:', error)
