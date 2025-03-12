@@ -9,7 +9,15 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-
+    env:
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+      POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GITHUB_ID: ${{ secrets.GITHUB_ID }}
+      GITHUB_SECRET: ${{ secrets.GITHUB_SECRET }}
+      AUTH_URL: ${{ secrets.AUTH_URL }}
+      NEXTAUTH_URL: ${{ secrets.NEXTAUTH_URL }}
+      
     permissions:
       id-token: write # Needed for auth with Deno Deploy
       contents: read # Needed to clone the repository
