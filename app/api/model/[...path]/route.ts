@@ -80,7 +80,7 @@ async function getPrisma(c: Context) {
           user = await prisma.user.update({
             where: { id: user.id },
             data: updates as Prisma.UserUpdateInput,
-            include: { memberships: true }
+            include: { memberships: true, accounts: true }
           })
         }
 
