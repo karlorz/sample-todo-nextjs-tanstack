@@ -39,8 +39,8 @@ const createAuthConfig: ConfigHandler = () => {
     secret: process.env.AUTH_SECRET || 'fallback-secret-key-replace-in-production',
     providers: [
       GitHub({
-        clientId: process.env.GITHUB_ID || '',
-        clientSecret: process.env.GITHUB_SECRET || '',
+        clientId: process.env.AUTH_GITHUB_ID || '',
+        clientSecret: process.env.AUTH_GITHUB_SECRET || '',
       }),
       Credentials({
         name: 'credentials',
