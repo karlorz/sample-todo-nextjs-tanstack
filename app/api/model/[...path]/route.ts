@@ -5,8 +5,6 @@ import { Hono } from 'hono'
 import { createHonoHandler } from '@zenstackhq/server/hono'
 import { handle } from 'hono/vercel'
 import { prisma } from 'server/db'
-import type { User, Prisma } from '@prisma/client'
-
 export const runtime = 'nodejs'
 
 interface SessionResponse {
@@ -16,128 +14,105 @@ interface SessionResponse {
   } | null
 }
 
-interface UserUpdates extends Partial<User> {
-  accounts?: {
-    create: {
-      provider: string;
-      providerAccountId: string;
-      type: string;
-    }
-  }
-}
-
-interface OAuthData {
-  provider: string;
-  providerAccountId: string;
-}
-
 // create an enhanced Prisma client with user context
 async function getPrisma(c: Context) {
   try {
-    const authUrl = new URL('/api/auth/session', c.req.url)
-    const cookieHeader = c.req.header('cookie')
+    let baseUrl = '';
+    if (c.req.url.startsWith('https://')) {
+      baseUrl = new URL(c.req.url).origin;
+    } else {
+      baseUrl = 'http://localhost:3000';
+    }
+
+    const authUrl = new URL('/api/auth/session', baseUrl);
+    const cookieHeader = c.req.header('cookie');
+
+    console.log('Fetching auth session from:', authUrl.toString());
+    console.log('With cookie header:', cookieHeader);
     
-    const response = await fetch(authUrl, {
+    const response = await fetch(authUrl.toString(), {
       headers: {
         cookie: cookieHeader || '',
-      }
-    })
+      },
+      cache: 'no-store'  // Ensure we always get fresh session data
+    });
 
     if (!response.ok) {
-      return enhance(prisma)
+      console.error('Failed to fetch auth session:', response.status, response.statusText);
+      return enhance(prisma);
     }
 
-    const data = (await response.json()) as SessionResponse
-    const user = data.user
-    
-    if (!user?.id || !user?.email) {
-      return enhance(prisma)
+    const data = await response.json() as SessionResponse;
+    console.log('Auth session data:', data);
+
+    if (!data.user?.email) {
+      console.log('No valid user email in session');
+      return enhance(prisma);
     }
 
-    // Extract and validate OAuth data if present
-    const oauthData: OAuthData | undefined = 
-      user.provider && user.providerAccountId
-        ? { provider: user.provider, providerAccountId: user.providerAccountId }
-        : undefined
-
-    // Try to find existing user and their accounts
-    let dbUser = await prisma.user.findFirst({
+    console.log('Looking up user by email:', data.user.email);
+    // Try to find user by email first
+    const dbUser = await prisma.user.findUnique({
       where: {
-        OR: [
-          { id: user.id },
-          { email: user.email },
-          ...(oauthData ? [{
-            accounts: {
-              some: {
-                provider: oauthData.provider,
-                providerAccountId: oauthData.providerAccountId
-              }
-            }
-          }] : [])
-        ]
+        email: data.user.email
       },
       include: { 
-        memberships: true,
-        accounts: true
-      },
-    })
-
-    if (dbUser) {
-      // Update existing user if needed
-      const updates: UserUpdates = {}
-      if (dbUser.id !== user.id) updates.id = user.id
-      if (dbUser.name !== user.name) updates.name = user.name || null
-      if (dbUser.image !== user.image) updates.image = user.image || null
-      
-      if (Object.keys(updates).length > 0) {
-        dbUser = await prisma.user.update({
-          where: { id: dbUser.id },
-          data: updates as Prisma.UserUpdateInput,
-          include: { memberships: true, accounts: true }
-        })
-      }
-
-      // If this is OAuth login and we don't have an account record yet, create it
-      if (oauthData && !dbUser.accounts.some(a => 
-        a.provider === oauthData.provider && 
-        a.providerAccountId === oauthData.providerAccountId
-      )) {
-        await prisma.account.create({
-          data: {
-            ...oauthData,
-            type: 'oauth',
-            userId: dbUser.id
-          }
-        })
-      }
-    } else {
-      // Create new user
-      dbUser = await prisma.user.create({
-        data: {
-          id: user.id,
-          email: user.email,
-          name: user.name || null,
-          image: user.image || null,
-          ...(oauthData ? {
-            accounts: {
-              create: {
-                ...oauthData,
-                type: 'oauth'
-              }
-            }
-          } : {}),
-          memberships: {
-            create: [] // Initialize empty memberships array
+        memberships: {
+          include: {
+            space: true
           }
         },
-        include: { 
-          memberships: true,
-          accounts: true
+        ownedSpaces: true
+      }
+    })
+
+
+    if (!dbUser) {
+      console.log('User not found, creating new user');
+      // Create new user if not found
+      const newUser = await prisma.user.create({
+        data: {
+          id: data.user.id,
+          email: data.user.email,
+          name: data.user.name || null,
+          image: data.user.image || null,
+        },
+        include: {
+          memberships: {
+            include: {
+              space: true
+            }
+          },
+          ownedSpaces: true
         }
-      })
+      });
+      console.log('Created new user:', newUser.id);
+      return enhance(prisma, { user: newUser });
     }
 
-    return enhance(prisma, { user: dbUser })
+    console.log('Found existing user:', dbUser.id);
+    // Update user info if needed
+    if (dbUser.name !== data.user.name || dbUser.image !== data.user.image) {
+      console.log('Updating user info');
+      const updatedUser = await prisma.user.update({
+        where: { id: dbUser.id },
+        data: {
+          name: data.user.name || dbUser.name,
+          image: data.user.image || dbUser.image,
+        },
+        include: {
+          memberships: {
+            include: {
+              space: true
+            }
+          },
+          ownedSpaces: true
+        }
+      });
+      console.log('User info updated');
+      return enhance(prisma, { user: updatedUser });
+    }
+    return enhance(prisma, { user: dbUser });
   } catch (error) {
     console.error('Failed to get user session:', error)
     return enhance(prisma)
