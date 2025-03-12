@@ -26,6 +26,11 @@ interface UserUpdates extends Partial<User> {
   }
 }
 
+interface OAuthData {
+  provider: string;
+  providerAccountId: string;
+}
+
 // create an enhanced Prisma client with user context
 async function getPrisma(c: Context) {
   try {
@@ -43,93 +48,100 @@ async function getPrisma(c: Context) {
     }
 
     const data = (await response.json()) as SessionResponse
+    const user = data.user
     
-    if (data.user?.id && data.user?.email) {
-      // Try to find existing user and their accounts
-      let user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { id: data.user.id },
-            { email: data.user.email },
-            ...(data.user.provider && data.user.providerAccountId ? [{
-              accounts: {
-                some: {
-                  provider: data.user.provider,
-                  providerAccountId: data.user.providerAccountId
-                }
+    if (!user?.id || !user?.email) {
+      return enhance(prisma)
+    }
+
+    // Extract and validate OAuth data if present
+    const oauthData: OAuthData | undefined = 
+      user.provider && user.providerAccountId
+        ? { provider: user.provider, providerAccountId: user.providerAccountId }
+        : undefined
+
+    // Try to find existing user and their accounts
+    let dbUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { id: user.id },
+          { email: user.email },
+          ...(oauthData ? [{
+            accounts: {
+              some: {
+                provider: oauthData.provider,
+                providerAccountId: oauthData.providerAccountId
               }
-            }] : [])
-          ]
+            }
+          }] : [])
+        ]
+      },
+      include: { 
+        memberships: true,
+        accounts: true
+      },
+    })
+
+    if (dbUser) {
+      // Update existing user if needed
+      const updates: UserUpdates = {}
+      if (dbUser.id !== user.id) updates.id = user.id
+      if (dbUser.name !== user.name) updates.name = user.name || null
+      if (dbUser.image !== user.image) updates.image = user.image || null
+      
+      if (Object.keys(updates).length > 0) {
+        dbUser = await prisma.user.update({
+          where: { id: dbUser.id },
+          data: updates as Prisma.UserUpdateInput,
+          include: { memberships: true, accounts: true }
+        })
+      }
+
+      // If this is OAuth login and we don't have an account record yet, create it
+      if (oauthData && !dbUser.accounts.some(a => 
+        a.provider === oauthData.provider && 
+        a.providerAccountId === oauthData.providerAccountId
+      )) {
+        await prisma.account.create({
+          data: {
+            ...oauthData,
+            type: 'oauth',
+            userId: dbUser.id
+          }
+        })
+      }
+    } else {
+      // Create new user
+      dbUser = await prisma.user.create({
+        data: {
+          id: user.id,
+          email: user.email,
+          name: user.name || null,
+          image: user.image || null,
+          ...(oauthData ? {
+            accounts: {
+              create: {
+                ...oauthData,
+                type: 'oauth'
+              }
+            }
+          } : {}),
+          memberships: {
+            create: [] // Initialize empty memberships array
+          }
         },
         include: { 
           memberships: true,
           accounts: true
-        },
+        }
       })
-
-      const isOAuthLogin = data.user.provider && data.user.providerAccountId;
-
-      if (user) {
-        // Update existing user if needed
-        const updates: UserUpdates = {};
-        if (user.id !== data.user.id) updates.id = data.user.id;
-        if (user.name !== data.user.name && data.user.name) updates.name = data.user.name;
-        if (user.image !== data.user.image && data.user.image) updates.image = data.user.image;
-        
-        if (Object.keys(updates).length > 0) {
-          user = await prisma.user.update({
-            where: { id: user.id },
-            data: updates as Prisma.UserUpdateInput,
-            include: { memberships: true, accounts: true }
-          })
-        }
-
-        // If this is OAuth login and we don't have an account record yet, create it
-        if (isOAuthLogin && !user.accounts.some(a => 
-          a.provider === data.user.provider && 
-          a.providerAccountId === data.user.providerAccountId
-        )) {
-          await prisma.account.create({
-            data: {
-              provider: data.user.provider!,
-              providerAccountId: data.user.providerAccountId!,
-              type: 'oauth',
-              userId: user.id
-            }
-          })
-        }
-      } else {
-        // Create new user
-        user = await prisma.user.create({
-          data: {
-            id: data.user.id,
-            email: data.user.email,
-            name: data.user.name || null,
-            image: data.user.image || null,
-            ...(isOAuthLogin ? {
-              accounts: {
-                create: {
-                  provider: data.user.provider!,
-                  providerAccountId: data.user.providerAccountId!,
-                  type: 'oauth'
-                }
-              }
-            } : {})
-          },
-          include: { memberships: true }
-        })
-      }
-
-      if (user) {
-        return enhance(prisma, { user })
-      }
     }
+
+    return enhance(prisma, { user: dbUser })
   } catch (error) {
     console.error('Failed to get user session:', error)
+    return enhance(prisma)
   }
-
-  // anonymous user
-  return enhance(prisma)
 }
 
 const app = new Hono()

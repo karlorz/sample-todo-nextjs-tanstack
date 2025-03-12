@@ -1,38 +1,20 @@
 import { PrismaClient } from '@prisma/client';
-import { createClient } from '@libsql/client';
-import { PrismaLibSQL } from '@prisma/adapter-libsql';
 
-// Check if we're running in an Edge environment
-const isEdgeRuntime = () => {
-  return (
-    process.env.EDGE_RUNTIME === '1' || 
-    process.env.NEXT_RUNTIME === 'edge' || 
-    process.env.VERCEL_REGION === 'dev1'
-  );
-};
-
-// Create a standard db client or an adapter-based one for Edge
+// Create a standard db client
 function createPrismaClient() {
-  if (isEdgeRuntime()) {
-    // For Edge Runtime, use the LibSQL adapter
-    const connectionString = process.env.DATABASE_URL || 'file:./dev.db';
-    const authToken = process.env.DATABASE_AUTH_TOKEN;
-    
-    // Create the LibSQL client
-    const libsql = createClient({ 
-      url: connectionString,
-      authToken: authToken
-    });
-    
-    // Create the adapter
-    const adapter = new PrismaLibSQL(libsql);
-    
-    // Return a PrismaClient that uses the adapter
-    return new PrismaClient({ adapter });
-  } else {
-    // For regular Node.js environment, use the standard PrismaClient
-    return new PrismaClient();
+  const datasourceUrl = process.env.POSTGRES_URL;
+  
+  if (!datasourceUrl) {
+    throw new Error('POSTGRES_URL environment variable is not set');
   }
+
+  return new PrismaClient({
+    datasources: {
+      db: {
+        url: datasourceUrl,
+      },
+    },
+  });
 }
 
 // Ensure we reuse the client in development to prevent too many connections
@@ -41,8 +23,14 @@ declare global {
   var prisma: PrismaClient | undefined;
 }
 
-export const prisma = global.prisma || createPrismaClient();
+// In production, don't use global object
+const prismaClient = 
+  process.env.NODE_ENV === 'production'
+    ? createPrismaClient()
+    : global.prisma ?? createPrismaClient();
 
 if (process.env.NODE_ENV !== 'production') {
-  global.prisma = prisma;
+  global.prisma = prismaClient;
 }
+
+export { prismaClient as prisma };
