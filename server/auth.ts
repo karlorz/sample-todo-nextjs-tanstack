@@ -11,3 +11,5 @@ export {
   initAuthConfig,
   verifyAuth,
 } from '@hono/auth-js'
+
+export const runtime = 'nodejs'
